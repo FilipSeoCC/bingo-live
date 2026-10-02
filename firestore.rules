@@ -1,0 +1,16 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pokój można odczytać po kodzie, ale nie da się wylistować wszystkich pokoi ani niczego usunąć.
+    match /rooms/{room} {
+      allow get: if true;
+      allow list: if false;
+      allow create, update: if request.resource.data.tiles is list
+        && request.resource.data.tiles.size() == 25
+        && request.resource.data.order is list
+        && request.resource.data.order.size() == 25
+        && request.resource.data.done is list;
+      allow delete: if false;
+    }
+  }
+}

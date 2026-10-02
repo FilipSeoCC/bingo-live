@@ -24,7 +24,7 @@
   .tile.done::after { content:"✕"; position:absolute; font-size:clamp(40px,10vw,80px); color:var(--accent); opacity:.35; font-weight:700; }
   .tile.win { border-color:var(--win); box-shadow:0 0 0 2px var(--win) inset; }
   #msg { margin-top:14px; font-size:22px; font-weight:700; color:var(--win); text-align:center; min-height:30px; }
-  #status { font-size:12px; opacity:.6; margin-top:8px; }
+  #status { font-size:13px; color:#ffb86b; margin-top:8px; text-align:center; }
   #join { margin-top:60px; display:flex; flex-direction:column; gap:10px; align-items:center; }
   #editor { width:min(100%,760px); display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:6px; }
   #editor input { width:100%; }
@@ -40,7 +40,7 @@
 </div>
 
 <div id="game" hidden>
-  <div class="sub">Pokój: <b id="roomName"></b> · kliknij kafelek, żeby skreślić. Widzą to wszyscy.</div>
+  <div class="sub">Pokój: <b id="roomName"></b> · kliknij kafelek, żeby skreślić. Widzą to wszyscy na żywo.</div>
   <div class="bar">
     <button id="share">🔗 Kopiuj link</button>
     <button id="shuffle">🔀 Nowa plansza</button>
@@ -58,14 +58,27 @@
   <div id="status"></div>
 </div>
 
-<script>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+import { getFirestore, doc, onSnapshot, runTransaction, updateDoc, arrayUnion, arrayRemove } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+import { firebaseConfig } from "./firebase-config.js";
+
 const $ = id => document.getElementById(id);
+const DEFAULT_TILES = [
+  "Wzmianka o Stasiu od Grubej", "Randeczka Iwa", "Iwo zmęczony – praca i życie", "Sprzedaż spółki – bardzo ważna sprawa", "Iwo kwanty",
+  "Gruba, pijesz", "Iwo: ja też szukam mieszkania", "Gruba: wzmianka o kebabie", "Kolega się odezwie", "Związek kolegi",
+  "Kolega i aplikacja randkowa", "Nina Reich – piłka nożna", "Temat ziółka", "Ania wgapia się", "Iwo wtulony w Anię/Paulę",
+  "Iwo pali papierosa", "Zosia Rogalińska – wzmianka", "Wróżka od Franka", "Festiwal", "Temat matchy",
+  "Temat pracy z dziećmi", "Gruba się jeszcze nie przeprowadziła", "Gruba urządza mieszkanie", "Iwo opowiada o Walencji", "Dziewczyna z Sopotu pisze do Iwa"
+];
 const LINES = [];
 for (let i = 0; i < 5; i++) { LINES.push([0,1,2,3,4].map(c => i*5+c)); LINES.push([0,1,2,3,4].map(r => r*5+i)); }
 LINES.push([0,6,12,18,24]); LINES.push([4,8,12,16,20]);
+const shuffle = () => { const a = [...Array(25).keys()]; for (let i = 24; i > 0; i--) { const j = Math.floor(Math.random()*(i+1)); [a[i],a[j]] = [a[j],a[i]]; } return a; };
 
 const room = (new URLSearchParams(location.search).get("r") || "").toLowerCase().replace(/[^a-z0-9-]/g, "");
-let data = null, editing = false, inflight = 0;
+let data = null, editing = false, ref = null;
+const setStatus = t => $("status").textContent = t ? "⚠️ " + t : "";
 
 if (!room) {
   $("join").hidden = false;
@@ -78,59 +91,50 @@ if (!room) {
   start();
 }
 
-async function api(body) {
-  const opt = body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: room, ...body }) } : {};
-  const r = await fetch("/api/room" + (body ? "" : "?id=" + room), opt);
-  const j = await r.json();
-  if (!r.ok) throw new Error(j.error || r.status);
-  return j;
-}
-
 function render() {
   if (!data || editing) return;
   const grid = $("grid"); grid.innerHTML = "";
-  const done = new Set(data.done), win = new Set(); let lines = 0;
+  const done = new Set(data.done || []), win = new Set(); let lines = 0;
   LINES.forEach(l => { if (l.every(p => done.has(p))) { lines++; l.forEach(p => win.add(p)); } });
   data.order.forEach((idx, pos) => {
     const d = document.createElement("div");
     d.className = "tile" + (done.has(pos) ? " done" : "") + (win.has(pos) ? " win" : "");
     d.textContent = data.tiles[idx];
-    d.onclick = () => toggle(pos, !done.has(pos));
+    d.onclick = () => run(() => updateDoc(ref, { done: done.has(pos) ? arrayRemove(pos) : arrayUnion(pos) }));
     grid.appendChild(d);
   });
   $("count").textContent = `Skreślone: ${done.size}/25 · Linie: ${lines}`;
   $("msg").textContent = done.size === 25 ? "🏆 PEŁNA PLANSZA!" : lines ? "🎉 BINGO!" : "";
 }
 
-async function toggle(pos, value) {
-  const s = new Set(data.done); value ? s.add(pos) : s.delete(pos); data.done = [...s]; render(); // optymistycznie
-  inflight++;
-  try { data = await api({ action: "mark", pos, value }); render(); } catch (e) { setStatus(e.message); } finally { inflight--; }
-}
+async function run(fn) { try { await fn(); setStatus(""); } catch (e) { setStatus(e.message); } }
 
-async function poll() {
-  if (inflight || editing || document.hidden) return;
-  try { data = await api(); render(); setStatus(""); } catch (e) { setStatus(e.message); }
-}
-function setStatus(t) { $("status").textContent = t ? "⚠️ " + t : ""; }
+async function start() {
+  if (!firebaseConfig.projectId || firebaseConfig.projectId.startsWith("WKLEJ")) { setStatus("Uzupełnij public/firebase-config.js danymi swojego projektu Firebase."); return; }
+  const db = getFirestore(initializeApp(firebaseConfig));
+  ref = doc(db, "rooms", room);
+  try {
+    await runTransaction(db, async tx => {
+      if (!(await tx.get(ref)).exists()) tx.set(ref, { tiles: DEFAULT_TILES, order: shuffle(), done: [] });
+    });
+  } catch (e) { setStatus(e.message); }
+  onSnapshot(ref, snap => { if (snap.exists()) { data = snap.data(); render(); setStatus(""); } }, e => setStatus(e.message));
 
-function start() {
-  poll(); setInterval(poll, 2500);
-  document.addEventListener("visibilitychange", poll);
   $("share").onclick = async () => { try { await navigator.clipboard.writeText(location.href); $("share").textContent = "✓ Skopiowano"; setTimeout(() => $("share").textContent = "🔗 Kopiuj link", 1500); } catch { prompt("Skopiuj link:", location.href); } };
-  $("shuffle").onclick = async () => { if (confirm("Nowa plansza zmieni układ i wyczyści skreślenia u wszystkich. Na pewno?")) { data = await api({ action: "shuffle" }); render(); } };
-  $("clear").onclick = async () => { if (confirm("Wyczyścić skreślenia u wszystkich?")) { data = await api({ action: "clear" }); render(); } };
+  $("shuffle").onclick = () => confirm("Nowa plansza zmieni układ i wyczyści skreślenia u wszystkich. Na pewno?") && run(() => updateDoc(ref, { order: shuffle(), done: [] }));
+  $("clear").onclick = () => confirm("Wyczyścić skreślenia u wszystkich?") && run(() => updateDoc(ref, { done: [] }));
   $("edit").onclick = () => {
     if (!data) return; editing = true;
     $("grid").hidden = true; $("editor").hidden = false; $("editbar").hidden = false;
     const ed = $("editor"); ed.innerHTML = "";
-    data.tiles.forEach((t, i) => { const inp = document.createElement("input"); inp.type = "text"; inp.value = t; inp.maxLength = 120; inp.dataset.i = i; ed.appendChild(inp); });
+    data.tiles.forEach(t => { const inp = document.createElement("input"); inp.type = "text"; inp.value = t; inp.maxLength = 120; ed.appendChild(inp); });
   };
   const closeEdit = () => { editing = false; $("grid").hidden = false; $("editor").hidden = true; $("editbar").hidden = true; render(); };
   $("cancelEdit").onclick = closeEdit;
   $("saveTiles").onclick = async () => {
     const tiles = [...$("editor").querySelectorAll("input")].map(i => i.value.trim() || "—");
-    try { data = await api({ action: "tiles", tiles }); closeEdit(); } catch (e) { setStatus(e.message); }
+    await run(() => updateDoc(ref, { tiles }));
+    closeEdit();
   };
 }
 </script>
