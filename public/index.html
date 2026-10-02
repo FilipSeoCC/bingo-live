@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bingo</title>
+<style>
+  :root { --bg:#14111f; --card:#221d36; --line:#3a3258; --text:#f3efff; --accent:#ff4fa3; --win:#2ee6a6; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  [hidden] { display:none !important; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:system-ui,Segoe UI,Arial,sans-serif; min-height:100vh; display:flex; flex-direction:column; align-items:center; padding:16px; }
+  h1 { margin:4px 0 2px; font-size:28px; letter-spacing:2px; }
+  .sub { opacity:.6; font-size:14px; margin-bottom:12px; text-align:center; }
+  .bar { display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap; justify-content:center; align-items:center; }
+  button { background:var(--card); color:var(--text); border:1px solid var(--line); border-radius:10px; padding:9px 14px; font-size:14px; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#1a0a14; font-weight:600; }
+  input[type=text] { background:var(--card); color:var(--text); border:1px solid var(--line); border-radius:10px; padding:9px 12px; font-size:15px; }
+  .count { font-size:14px; opacity:.8; }
+  #grid { display:grid; grid-template-columns:repeat(5,1fr); gap:6px; width:min(100%,760px); }
+  .tile { position:relative; aspect-ratio:1; background:var(--card); border:1px solid var(--line); border-radius:10px; display:flex; align-items:center; justify-content:center; text-align:center; padding:6px; font-size:clamp(10px,2.4vw,16px); line-height:1.2; cursor:pointer; user-select:none; overflow:hidden; transition:transform .1s, background .2s; }
+  .tile:active { transform:scale(.96); }
+  .tile.done { background:#2b2342; color:#8d86a8; text-decoration:line-through; text-decoration-thickness:2px; text-decoration-color:var(--accent); }
+  .tile.done::after { content:"✕"; position:absolute; font-size:clamp(40px,10vw,80px); color:var(--accent); opacity:.35; font-weight:700; }
+  .tile.win { border-color:var(--win); box-shadow:0 0 0 2px var(--win) inset; }
+  #msg { margin-top:14px; font-size:22px; font-weight:700; color:var(--win); text-align:center; min-height:30px; }
+  #status { font-size:12px; opacity:.6; margin-top:8px; }
+  #join { margin-top:60px; display:flex; flex-direction:column; gap:10px; align-items:center; }
+  #editor { width:min(100%,760px); display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:6px; }
+  #editor input { width:100%; }
+</style>
+</head>
+<body>
+<h1>BINGO</h1>
+
+<div id="join" hidden>
+  <div class="sub">Wpisz kod pokoju. Wszyscy z tym samym kodem widzą te same skreślenia.</div>
+  <input type="text" id="code" placeholder="np. ekipa" maxlength="32" autocapitalize="off">
+  <button class="primary" id="go">Wejdź</button>
+</div>
+
+<div id="game" hidden>
+  <div class="sub">Pokój: <b id="roomName"></b> · kliknij kafelek, żeby skreślić. Widzą to wszyscy.</div>
+  <div class="bar">
+    <button id="share">🔗 Kopiuj link</button>
+    <button id="shuffle">🔀 Nowa plansza</button>
+    <button id="clear">🧽 Wyczyść skreślenia</button>
+    <button id="edit">✏️ Edytuj hasła</button>
+    <span class="count" id="count"></span>
+  </div>
+  <div id="grid"></div>
+  <div id="editor" hidden></div>
+  <div class="bar" id="editbar" hidden style="margin-top:12px">
+    <button class="primary" id="saveTiles">Zapisz hasła</button>
+    <button id="cancelEdit">Anuluj</button>
+  </div>
+  <div id="msg"></div>
+  <div id="status"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const LINES = [];
+for (let i = 0; i < 5; i++) { LINES.push([0,1,2,3,4].map(c => i*5+c)); LINES.push([0,1,2,3,4].map(r => r*5+i)); }
+LINES.push([0,6,12,18,24]); LINES.push([4,8,12,16,20]);
+
+const room = (new URLSearchParams(location.search).get("r") || "").toLowerCase().replace(/[^a-z0-9-]/g, "");
+let data = null, editing = false, inflight = 0;
+
+if (!room) {
+  $("join").hidden = false;
+  const go = () => { const c = $("code").value.trim().toLowerCase().replace(/[^a-z0-9-]/g, ""); if (c) location.search = "?r=" + c; };
+  $("go").onclick = go;
+  $("code").onkeydown = e => { if (e.key === "Enter") go(); };
+} else {
+  $("game").hidden = false;
+  $("roomName").textContent = room;
+  start();
+}
+
+async function api(body) {
+  const opt = body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: room, ...body }) } : {};
+  const r = await fetch("/api/room" + (body ? "" : "?id=" + room), opt);
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.status);
+  return j;
+}
+
+function render() {
+  if (!data || editing) return;
+  const grid = $("grid"); grid.innerHTML = "";
+  const done = new Set(data.done), win = new Set(); let lines = 0;
+  LINES.forEach(l => { if (l.every(p => done.has(p))) { lines++; l.forEach(p => win.add(p)); } });
+  data.order.forEach((idx, pos) => {
+    const d = document.createElement("div");
+    d.className = "tile" + (done.has(pos) ? " done" : "") + (win.has(pos) ? " win" : "");
+    d.textContent = data.tiles[idx];
+    d.onclick = () => toggle(pos, !done.has(pos));
+    grid.appendChild(d);
+  });
+  $("count").textContent = `Skreślone: ${done.size}/25 · Linie: ${lines}`;
+  $("msg").textContent = done.size === 25 ? "🏆 PEŁNA PLANSZA!" : lines ? "🎉 BINGO!" : "";
+}
+
+async function toggle(pos, value) {
+  const s = new Set(data.done); value ? s.add(pos) : s.delete(pos); data.done = [...s]; render(); // optymistycznie
+  inflight++;
+  try { data = await api({ action: "mark", pos, value }); render(); } catch (e) { setStatus(e.message); } finally { inflight--; }
+}
+
+async function poll() {
+  if (inflight || editing || document.hidden) return;
+  try { data = await api(); render(); setStatus(""); } catch (e) { setStatus(e.message); }
+}
+function setStatus(t) { $("status").textContent = t ? "⚠️ " + t : ""; }
+
+function start() {
+  poll(); setInterval(poll, 2500);
+  document.addEventListener("visibilitychange", poll);
+  $("share").onclick = async () => { try { await navigator.clipboard.writeText(location.href); $("share").textContent = "✓ Skopiowano"; setTimeout(() => $("share").textContent = "🔗 Kopiuj link", 1500); } catch { prompt("Skopiuj link:", location.href); } };
+  $("shuffle").onclick = async () => { if (confirm("Nowa plansza zmieni układ i wyczyści skreślenia u wszystkich. Na pewno?")) { data = await api({ action: "shuffle" }); render(); } };
+  $("clear").onclick = async () => { if (confirm("Wyczyścić skreślenia u wszystkich?")) { data = await api({ action: "clear" }); render(); } };
+  $("edit").onclick = () => {
+    if (!data) return; editing = true;
+    $("grid").hidden = true; $("editor").hidden = false; $("editbar").hidden = false;
+    const ed = $("editor"); ed.innerHTML = "";
+    data.tiles.forEach((t, i) => { const inp = document.createElement("input"); inp.type = "text"; inp.value = t; inp.maxLength = 120; inp.dataset.i = i; ed.appendChild(inp); });
+  };
+  const closeEdit = () => { editing = false; $("grid").hidden = false; $("editor").hidden = true; $("editbar").hidden = true; render(); };
+  $("cancelEdit").onclick = closeEdit;
+  $("saveTiles").onclick = async () => {
+    const tiles = [...$("editor").querySelectorAll("input")].map(i => i.value.trim() || "—");
+    try { data = await api({ action: "tiles", tiles }); closeEdit(); } catch (e) { setStatus(e.message); }
+  };
+}
+</script>
+</body>
+</html>
